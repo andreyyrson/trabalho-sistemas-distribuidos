@@ -38,6 +38,26 @@ class ParallelTest(unittest.TestCase):
         ]
         self.assertLess(min(found_counts), total_pairs)
 
+    def test_every_strategy_equals_sequential(self):
+        shingle_sets, _ = build(60, plagiarism_rate=0.2, min_words=200, max_words=600)
+        expected = sequential.find_similar_pairs(shingle_sets, THRESHOLD)
+        for strategy in parallel.ROW_STRATEGIES:
+            with self.subTest(strategy=strategy):
+                found = parallel.find_similar_pairs(shingle_sets, THRESHOLD, processes=4, strategy=strategy)
+                self.assertEqual(found, expected)
+
+    def test_every_strategy_keeps_every_match_under_max_contention(self):
+        shingle_sets, _ = build(120, min_words=20, max_words=40)
+        total_pairs = len(shingle_sets) * (len(shingle_sets) - 1) // 2
+        for strategy in parallel.ROW_STRATEGIES:
+            with self.subTest(strategy=strategy):
+                found = parallel.find_similar_pairs(shingle_sets, 0.0, processes=4, strategy=strategy)
+                self.assertEqual(len(found), total_pairs)
+
+    def test_unknown_strategy_is_rejected(self):
+        with self.assertRaises(ValueError):
+            parallel.find_similar_pairs([], THRESHOLD, strategy="nao_existe")
+
     def test_with_lock_keeps_every_match_under_max_contention(self):
         shingle_sets, _ = build(120, min_words=20, max_words=40)
         total_pairs = len(shingle_sets) * (len(shingle_sets) - 1) // 2

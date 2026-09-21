@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<title>Relatório Técnico - Detecção de plágio em paralelo</title>
+<style>
+  @page { size: A4; margin: 2cm; }
+  body { font-family: "Helvetica Neue", Arial, sans-serif; font-size: 10.5pt; line-height: 1.45; color: #1a1a1a; max-width: 17cm; margin: 0 auto; padding: 1cm; }
+  h1 { font-size: 18pt; margin: 0 0 4px; }
+  h2 { font-size: 13pt; margin: 22px 0 6px; padding-bottom: 3px; border-bottom: 1.5px solid #14506b; color: #14506b; break-after: avoid; }
+  h3 { font-size: 11pt; margin: 12px 0 4px; break-after: avoid; }
+  p, ul, ol { margin: 6px 0; }
+  table { border-collapse: collapse; width: 100%; margin: 8px 0; break-inside: avoid; font-size: 9.5pt; }
+  th, td { border: 1px solid #b8c7d1; padding: 4px 7px; text-align: left; vertical-align: top; }
+  th { background: #e6eff5; }
+  code { font-family: "DejaVu Sans Mono", monospace; font-size: 9pt; background: #f1f3f5; padding: 0 3px; }
+  pre { background: #f1f3f5; padding: 8px 10px; font-size: 8.8pt; line-height: 1.35; overflow-x: auto; break-inside: avoid; }
+  .meta { color: #555; font-size: 9.5pt; }
+  .todo { background: #fff2a8; padding: 0 3px; }
+  .aviso { background: #fff2a8; border: 1px solid #d4b800; padding: 8px 12px; margin-bottom: 16px; }
+  @media print { .no-print { display: none; } body { padding: 0; } }
+</style>
+</head>
+<body>
+
+<div class="aviso no-print">
+  <strong>Antes de exportar para PDF:</strong> substitua todos os trechos em amarelo por dados reais
+  (integrantes, dados da instância, tempos medidos e a análise) e depois apague este aviso.
+  Limite da lauda: 6 páginas. Exporte pelo navegador: Ctrl+P, destino "Salvar como PDF", papel A4.
+</div>
+
+<h1>Detecção de plágio em paralelo</h1>
+<p class="meta">Relatório técnico da Etapa 1 · Disciplina 070080 Sistemas Distribuídos e Paralelos · Professor Fábio Rocha de Araújo<br>
+Equipe: <span class="todo">[nomes e matrículas dos 3 ou 4 integrantes]</span> · Turma: <span class="todo">[CC6NA / CC6MA]</span><br>
+Repositório: https://github.com/andreyyrson/trabalho-sistemas-distribuidos</p>
+
+<h2>1. O problema</h2>
+<p>Dado um conjunto de N documentos, o programa encontra todos os pares parecidos entre si (detecção de plágio).
+Cada documento vira o conjunto de seus <em>shingles</em>, isto é, janelas de 5 palavras consecutivas, e dois
+documentos são considerados parecidos quando o índice de Jaccard entre os conjuntos é pelo menos 0,5.</p>
+<p>O trabalho é comparar todos os pares, N(N-1)/2 comparações, então o custo cresce com o quadrado de N.
+Cada comparação lê apenas os dois conjuntos e não depende de nenhuma outra. É isso que torna o problema divisível
+em partes independentes.</p>
+<table>
+  <tr><th>Item</th><th>Definição</th></tr>
+  <tr><td>Entrada</td><td>N documentos gerados por semente (<code>plagio/corpus.py</code>): vocabulário de 5.000 palavras, 500 a 4.000 palavras por documento, cerca de 5% deles são cópias de outro documento com 5% das palavras trocadas.</td></tr>
+  <tr><td>Unidade de trabalho</td><td>Uma linha <em>i</em> da matriz de pares: o documento <em>i</em> contra todos os <em>j &gt; i</em>.</td></tr>
+  <tr><td>Volume</td><td>N = <span class="todo">[N final]</span> documentos, isto é, <span class="todo">[N(N-1)/2]</span> pares. A versão sequencial leva <span class="todo">[tempo]</span> na máquina da nuvem.</td></tr>
+  <tr><td>Verificação</td><td>O resultado paralelo tem de ser igual ao sequencial e ao gabarito dos pares plantados. Por construção, cópia e original têm Jaccard esperado de cerca de 0,63 e textos sem relação ficam perto de 0, então o limiar de 0,5 separa os dois grupos.</td></tr>
+</table>
+<p>O corpus é sintético de propósito: plantar as cópias dá um gabarito exato, o que permite testar automaticamente
+qualquer versão do algoritmo e roda na instância sem baixar arquivos.</p>
+
+<h2>2. Estratégia de paralelização</h2>
+<table>
+  <tr><th>Decisão</th><th>Escolha</th><th>Justificativa</th></tr>
+  <tr><td>Dados ou tarefas</td><td>Paralelismo de dados</td><td>Todos os trabalhadores fazem a mesma operação (comparar) sobre pedaços diferentes da entrada (linhas da matriz de pares).</td></tr>
+  <tr><td>Processo ou thread</td><td>Processos (<code>multiprocessing</code>, método <code>fork</code>)</td><td>O trabalho é <strong>limitado por processador</strong>: a interseção de conjuntos não espera por E/S. Em CPython o GIL impede que threads executem esse código Python em paralelo, e um teste com threads mediria speedup próximo de 1. Processos têm interpretadores separados e usam os núcleos de fato.</td></tr>
+  <tr><td>Quantos trabalhadores</td><td><span class="todo">[nº de vCPUs da instância]</span></td><td>Um processo por vCPU. Mais que isso disputaria os mesmos núcleos sem ganho, e menos deixaria núcleos ociosos.</td></tr>
+  <tr><td>Divisão do trabalho</td><td>Dinâmica, uma linha por vez, da mais pesada para a mais leve</td><td>A linha 0 tem N-1 pares e a última tem zero. Uma divisão estática em blocos iguais deixaria o primeiro trabalhador com muito mais trabalho. Entregar uma linha por vez, começando pela maior, faz o processo que termina cedo pegar a próxima, o que equilibra a carga.</td></tr>
+</table>
+<p>Com <code>fork</code>, os conjuntos de shingles são herdados pelos processos filhos por <em>copy-on-write</em> e não são
+copiados nem serializados para cada um. Isso limita o método a Linux, que é o sistema da instância.</p>
+
+<h2>3. Sincronização</h2>
+<h3>Estado compartilhado</h3>
+<p>Os processos registram os pares parecidos numa memória compartilhada: um vetor de slots (<code>RawArray</code>) e um
+contador (<code>Value</code>) que indica o próximo slot livre.</p>
+<h3>Seção crítica e primitiva</h3>
+<p>A menor sequência que precisa ser indivisível é: <strong>ler o contador, gravar o par no slot, incrementar o contador</strong>
+(<code>_record_match</code> em <code>plagio/parallel.py</code>). Ela é protegida por um <strong>lock</strong>.</p>
+<pre>with _worker.lock:
+    slot = _worker.count.value
+    _worker.slots[2 * slot] = i
+    _worker.slots[2 * slot + 1] = j
+    _worker.count.value = slot + 1</pre>
+<p>Cada acesso a <code>count.value</code> já é protegido individualmente pelo objeto. O que não é atômico é a sequência
+inteira, e é ela que o lock externo protege. O lock cobre só o registro do par, e não a comparação: os pares parecidos
+são raros, então a seção crítica é curta e quase não há espera. Um lock em volta do laço inteiro também estaria correto,
+mas serializaria tudo e não haveria ganho.</p>
+<h3>Como a estabilidade é demonstrada</h3>
+<ul>
+  <li><strong>Testes automáticos</strong> (<code>tests/test_plagio.py</code>): o resultado com lock é igual ao sequencial em 20 execuções seguidas, e sob contenção máxima (limiar 0, todo par é registrado) nenhum dos pares se perde.</li>
+  <li><strong>Demonstração da corrida</strong> (<code>demo_race.py</code>): sem lock, dois processos leem o mesmo valor do contador e um sobrescreve o registro do outro, então pares somem do resultado. O número muda a cada execução. Com lock, o número é sempre o esperado. <span class="todo">[incluir aqui um exemplo real da saída do demo_race.py]</span></li>
+</ul>
+<h3>Troca de mensagens e carimbo lógico</h3>
+<p>Os processos <strong>não trocam mensagens</strong>: cada um lê a entrada herdada por <code>fork</code> e escreve numa memória
+compartilhada. Por isso o carimbo lógico não se aplica ao nosso caso. Não há eventos de envio e recebimento cuja ordem
+causal precise ser reconstruída, e a ordem entre as escritas é definida pelo lock.</p>
+
+<h2>4. Recursos provisionados na nuvem</h2>
+<p>A instância foi criada pela equipe no AWS Academy Learner Lab e é mostrada ao vivo no console durante a apresentação.</p>
+<table>
+  <tr><th>Item</th><th>Valor</th><th>Justificativa</th></tr>
+  <tr><td>Região e zonas</td><td>us-east-1 (N. Virginia), <span class="todo">[zona, por exemplo us-east-1a]</span>. Uma zona.</td><td>Uma instância isolada vale o compromisso de SLA de <strong>99,5%</strong> (até 216 min de indisponibilidade em 30 dias), que é suficiente para uma carga de medição e não de produção. Duas zonas dariam 99,99%, mas não trazem ganho para este trabalho.</td></tr>
+  <tr><td>Instância</td><td>Ubuntu Server 24.04 LTS, <span class="todo">[tipo, por exemplo c7i.xlarge / large]</span>, <span class="todo">[nº de vCPUs]</span> vCPUs. Uma instância.</td><td>Família de desempenho fixo. Instâncias <em>burstable</em> (t2/t3) foram evitadas porque os créditos de CPU distorceriam o speedup. <span class="todo">[Se o lab restringiu o tamanho, dizer aqui e por quê.]</span></td></tr>
+  <tr><td>Entrada e saída</td><td>Entrada: parâmetros (<code>--docs</code>, semente); o corpus é gerado em memória. Saída: pares encontrados e tempos, poucos KB no disco raiz (EBS de <span class="todo">[tamanho, tipo]</span>).</td><td>Volume pequeno; dados em memória evitam que o tempo de E/S de disco entre na medição.</td></tr>
+  <tr><td>Portas abertas</td><td>22 (SSH): origem <strong>IP da equipe /32</strong>.<br>8000 (serviço): origem <span class="todo">[IP da equipe /32 ou 0.0.0.0/0]</span>.</td><td>Ver abaixo.</td></tr>
+  <tr><td>Ligada ou por execução</td><td><span class="todo">[decidir: ligada durante as medições e parada entre elas, ou criada por execução]</span></td><td><span class="todo">[justificar: custo x conveniência]</span></td></tr>
+</table>
+<p><strong>Por que a porta administrativa não está aberta para <code>0.0.0.0/0</code>.</strong> O SSH dá controle total da máquina.
+Aberto à internet, qualquer pessoa poderia tentar adivinhar credenciais ou explorar falhas do serviço, e a exposição
+não traz benefício, já que só a equipe administra a instância. Restringir a origem ao IP da equipe reduz a superfície de
+ataque a um único endereço.</p>
+<p>O serviço (<code>server.py</code>) dispara computação pesada sem autenticação, e por isso a porta 8000 também é restrita
+<span class="todo">[se for o caso]</span>, e o serviço limita o tamanho do pedido e atende uma requisição por vez.</p>
+
+<h2>5. Medição de desempenho</h2>
+<h3>Método</h3>
+<ul>
+  <li><strong>Mesma máquina, mesma entrada:</strong> as duas versões rodam na instância da seção 4, com N = <span class="todo">[N]</span> e a mesma semente.</li>
+  <li><strong>Repetição:</strong> cada versão é medida <span class="todo">[3]</span> vezes e usamos a média. O desvio padrão mostra a variação.</li>
+  <li><strong>O que entra no tempo:</strong> o cálculo dos shingles roda só no processo pai e é parte <em>serial</em> nas duas versões. A geração do corpus fica fora da medição (é preparação da entrada).</li>
+  <li><strong>Fração paralelizável:</strong> p = T<sub>pares</sub> / (T<sub>pares</sub> + T<sub>shingles</sub>) = <span class="todo">[p]</span>, com os tempos medidos da versão sequencial.</li>
+  <li><strong>Speedup medido:</strong> (T<sub>seq</sub> + T<sub>shingles</sub>) / (T<sub>par</sub> + T<sub>shingles</sub>).</li>
+  <li><strong>Speedup previsto (Amdahl):</strong> S = 1 / ((1 − p) + p / n), com n trabalhadores.</li>
+</ul>
+<h3>Resultados</h3>
+<p>Tempo sequencial: <span class="todo">[X ± Y s]</span>. Tempo dos shingles (serial): <span class="todo">[Z s]</span>. p estimado: <span class="todo">[p]</span>.</p>
+<table>
+  <tr><th>Processos</th><th>Tempo paralelo (s)</th><th>Desvio (s)</th><th>Speedup medido</th><th>Eficiência</th><th>Amdahl</th></tr>
+  <tr><td><span class="todo">1</span></td><td><span class="todo"> </span></td><td><span class="todo"> </span></td><td><span class="todo"> </span></td><td><span class="todo"> </span></td><td><span class="todo"> </span></td></tr>
+  <tr><td><span class="todo">2</span></td><td><span class="todo"> </span></td><td><span class="todo"> </span></td><td><span class="todo"> </span></td><td><span class="todo"> </span></td><td><span class="todo"> </span></td></tr>
+  <tr><td><span class="todo">[n]</span></td><td><span class="todo"> </span></td><td><span class="todo"> </span></td><td><span class="todo"> </span></td><td><span class="todo"> </span></td><td><span class="todo"> </span></td></tr>
+</table>
+<p class="meta">A tabela é gerada por <code>scaling.py</code>; a linha com 1 processo mede o custo puro do paralelismo (criação dos processos e lock, sem ganho).</p>
+
+<h2>6. O que limitou o ganho</h2>
+<p><span class="todo">[Reescrever esta seção com base nos números da tabela. Compare o speedup medido com o previsto por Amdahl e explique a diferença com dados, não com hipóteses. Causas a verificar, e o que na medição as sustentaria:]</span></p>
+<ul>
+  <li><strong>Parte serial (shingles):</strong> é o que Amdahl já considera. Se o medido ficar próximo do previsto, esse é o limite dominante.</li>
+  <li><strong>Custo de criação dos processos e do Pool:</strong> visível na linha com 1 processo, cujo tempo fica acima do sequencial. <span class="todo">[número]</span></li>
+  <li><strong>vCPUs como threads de hardware:</strong> dois processos no mesmo núcleo físico não rendem o dobro. Se a eficiência cair de forma marcada ao passar de <span class="todo">[k]</span> processos, esse é o sinal. <span class="todo">[confirmar com lscpu na instância]</span></li>
+  <li><strong>Divisão desigual do trabalho:</strong> os documentos têm tamanhos diferentes, e o custo de um par depende dos dois. A divisão dinâmica reduz esse efeito, mas não o elimina no fim da execução, quando sobram poucas linhas.</li>
+  <li><strong>Espera na seção crítica:</strong> esperada como desprezível, porque os pares parecidos são poucos. <span class="todo">[só afirmar se medido, por exemplo comparando com uma versão sem registros]</span></li>
+</ul>
+
+<h2>7. Limitações</h2>
+<ul>
+  <li>O corpus é sintético: o Jaccard de textos reais tem uma distribuição menos limpa que a de palavras uniformes de um vocabulário.</li>
+  <li>O ambiente é um sandbox (Learner Lab) com orçamento e tipos de instância limitados. <span class="todo">[registrar o que foi restrito, se houve]</span></li>
+  <li>A versão paralela usa <code>fork</code> e portanto só roda em Linux.</li>
+</ul>
+
+</body>
+</html>
